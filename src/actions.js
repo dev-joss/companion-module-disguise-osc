@@ -1,12 +1,57 @@
 const choices = require('./choices')
 const utils = require('./utils')
 
+function parseOscInteger(input) {
+	if (typeof input !== 'string' && typeof input !== 'number') return NaN
+	const text = String(input).trim()
+	if (!/^[-+]?\d+$/.test(text)) return NaN
+	const value = Number(text)
+	return value >= -2147483648 && value <= 2147483647 ? value : NaN
+}
+
+function parseOscFloat(input) {
+	if (typeof input !== 'string' && typeof input !== 'number') return NaN
+	const text = String(input).trim()
+	if (!/^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?$/i.test(text)) return NaN
+	const value = Number(text)
+	return Number.isFinite(Math.fround(value)) ? value : NaN
+}
+
 exports.initActions = function () {
 	let self = this
 	let actions = {}
 
 	const showcontrol_base_address = '/d3/showcontrol/'
 	const layer_base_address = '/d3/layer/'
+
+	const sendNumericOsc = (path, input, parseValue, type) => {
+		const value = parseValue(input)
+		if (Number.isNaN(value)) {
+			this.log('error', `Invalid numeric OSC value for ${path}.`)
+			return
+		}
+		this.sendOscMessage(path, [{ type, value }])
+	}
+
+	const adjustLevel = (level, direction) => async (event, context) => {
+		const id = `${direction}_${level}`
+		let input = event.options.float
+		if (context && context.parseVariablesInString) {
+			input = await context.parseVariablesInString(input)
+			this.log('debug', `[${id}] parsed variable: ${input}`)
+		} else {
+			this.log('debug', `[${id}] using raw value: ${input}`)
+		}
+		const current = parseOscFloat(this.getVariableValue(level))
+		const step = parseOscFloat(input)
+		if (Number.isNaN(current) || Number.isNaN(step)) {
+			this.log('error', `[${id}] Invalid ${level} or step.`)
+			return
+		}
+		const decrease = direction === 'decrement' || (direction === 'shift' && utils.shift)
+		const value = decrease ? utils.decrement_float(current, step) : utils.increment_float(current, step)
+		sendNumericOsc(`${showcontrol_base_address}${level}`, value, parseOscFloat, 'f')
+	}
 
 	// utility actions
 	actions['shift'] = {
@@ -145,10 +190,10 @@ exports.initActions = function () {
 			} else {
 				this.log('debug', `[trackid] using raw value: ${intStr}`)
 			}
-			const intVal = parseInt(intStr)
+			const intVal = parseOscInteger(intStr)
 			this.log('debug', `[trackid] final int value: ${intVal}`)
 			if (isNaN(intVal)) {
-				this.log('debug', '[trackid] Not a number, aborting')
+				this.log('debug', '[trackid] Invalid OSC integer, aborting')
 				return
 			}
 			this.sendOscMessage(path, [
@@ -219,7 +264,7 @@ exports.initActions = function () {
 			if (context && context.parseVariablesInString) {
 				floatStr = await context.parseVariablesInString(floatStr)
 			}
-			const floatVal = parseFloat(floatStr)
+			const floatVal = parseOscFloat(floatStr)
 			if (isNaN(floatVal)) {
 				return
 			}
@@ -273,26 +318,7 @@ exports.initActions = function () {
 				useVariables: true,
 			},
 		],
-		callback: async (event, context) => {
-			let floatStr = event.options.float
-			if (context && context.parseVariablesInString) {
-				floatStr = await context.parseVariablesInString(floatStr)
-				this.log('debug', `[shift_brightness] parsed variable: ${floatStr}`)
-			} else {
-				this.log('debug', `[shift_brightness] using raw value: ${floatStr}`)
-			}
-			const brightness = this.getVariableValue('brightness')
-			let new_brightness = utils.shift
-				? utils.decrement_float(brightness, floatStr)
-				: utils.increment_float(brightness, floatStr)
-			const path = `${showcontrol_base_address}brightness`
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(new_brightness),
-				},
-			])
-		},
+		callback: adjustLevel('brightness', 'shift'),
 	}
 	actions['increment_brightness'] = {
 		name: 'Increase brightness',
@@ -309,24 +335,7 @@ exports.initActions = function () {
 				useVariables: true,
 			},
 		],
-		callback: async (event, context) => {
-			let floatStr = event.options.float
-			if (context && context.parseVariablesInString) {
-				floatStr = await context.parseVariablesInString(floatStr)
-				this.log('debug', `[increment_brightness] parsed variable: ${floatStr}`)
-			} else {
-				this.log('debug', `[increment_brightness] using raw value: ${floatStr}`)
-			}
-			const brightness = this.getVariableValue('brightness')
-			const new_brightness = utils.increment_float(brightness, floatStr)
-			const path = `${showcontrol_base_address}brightness`
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(new_brightness),
-				},
-			])
-		},
+		callback: adjustLevel('brightness', 'increment'),
 	}
 	actions['decrement_brightness'] = {
 		name: 'Decrease brightness',
@@ -343,24 +352,7 @@ exports.initActions = function () {
 				useVariables: true,
 			},
 		],
-		callback: async (event, context) => {
-			let floatStr = event.options.float
-			if (context && context.parseVariablesInString) {
-				floatStr = await context.parseVariablesInString(floatStr)
-				this.log('debug', `[decrement_brightness] parsed variable: ${floatStr}`)
-			} else {
-				this.log('debug', `[decrement_brightness] using raw value: ${floatStr}`)
-			}
-			const brightness = this.getVariableValue('brightness')
-			let new_brightness = utils.decrement_float(brightness, floatStr)
-			const path = `${showcontrol_base_address}brightness`
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(new_brightness),
-				},
-			])
-		},
+		callback: adjustLevel('brightness', 'decrement'),
 	}
 	actions['shift_volume'] = {
 		name: 'Shift aware volume',
@@ -377,24 +369,7 @@ exports.initActions = function () {
 				useVariables: true,
 			},
 		],
-		callback: async (event, context) => {
-			let floatStr = event.options.float
-			if (context && context.parseVariablesInString) {
-				floatStr = await context.parseVariablesInString(floatStr)
-				this.log('debug', `[shift_volume] parsed variable: ${floatStr}`)
-			} else {
-				this.log('debug', `[shift_volume] using raw value: ${floatStr}`)
-			}
-			const volume = this.getVariableValue('volume')
-			let new_volume = utils.shift ? utils.decrement_float(volume, floatStr) : utils.increment_float(volume, floatStr)
-			const path = `${showcontrol_base_address}volume`
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(new_volume),
-				},
-			])
-		},
+		callback: adjustLevel('volume', 'shift'),
 	}
 	actions['increment_volume'] = {
 		name: 'Increase volume',
@@ -411,24 +386,7 @@ exports.initActions = function () {
 				useVariables: true,
 			},
 		],
-		callback: async (event, context) => {
-			let floatStr = event.options.float
-			if (context && context.parseVariablesInString) {
-				floatStr = await context.parseVariablesInString(floatStr)
-				this.log('debug', `[increment_volume] parsed variable: ${floatStr}`)
-			} else {
-				this.log('debug', `[increment_volume] using raw value: ${floatStr}`)
-			}
-			const volume = this.getVariableValue('volume')
-			const new_volume = utils.increment_float(volume, floatStr)
-			const path = `${showcontrol_base_address}volume`
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(new_volume),
-				},
-			])
-		},
+		callback: adjustLevel('volume', 'increment'),
 	}
 	actions['decrement_volume'] = {
 		name: 'Decrease volume',
@@ -445,24 +403,7 @@ exports.initActions = function () {
 				useVariables: true,
 			},
 		],
-		callback: async (event, context) => {
-			let floatStr = event.options.float
-			if (context && context.parseVariablesInString) {
-				floatStr = await context.parseVariablesInString(floatStr)
-				this.log('debug', `[decrement_volume] parsed variable: ${floatStr}`)
-			} else {
-				this.log('debug', `[decrement_volume] using raw value: ${floatStr}`)
-			}
-			const volume = this.getVariableValue('volume')
-			const new_volume = utils.decrement_float(volume, floatStr)
-			const path = `${showcontrol_base_address}volume`
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(new_volume),
-				},
-			])
-		},
+		callback: adjustLevel('volume', 'decrement'),
 	}
 	// layer control actions
 	actions['layer_blendmode'] = {
@@ -495,13 +436,7 @@ exports.initActions = function () {
 			const layer = await this.parseVariablesInString(event.options.layer_name)
 			const path = `${base_address}${layer}/blendmode`
 			const int = await this.parseVariablesInString(event.options.mode)
-
-			this.sendOscMessage(path, [
-				{
-					type: 'i',
-					value: parseInt(int),
-				},
-			])
+			sendNumericOsc(path, int, parseOscInteger, 'i')
 		},
 	}
 	actions['layer_brightness'] = {
@@ -537,12 +472,7 @@ exports.initActions = function () {
 			const layer = await this.parseVariablesInString(event.options.layer_name)
 			const path = `${base_address}${layer}/brightness`
 			const float = await this.parseVariablesInString(event.options.float)
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(float),
-				},
-			])
+			sendNumericOsc(path, float, parseOscFloat, 'f')
 		},
 	}
 	actions['layer_tint'] = {
@@ -587,12 +517,7 @@ exports.initActions = function () {
 			const channel = await this.parseVariablesInString(event.options.channel)
 			const path = `${base_address}${layer}/tint.${channel}`
 			const float = await this.parseVariablesInString(event.options.float)
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(float),
-				},
-			])
+			sendNumericOsc(path, float, parseOscFloat, 'f')
 		},
 	}
 	actions['layer_speed'] = {
@@ -628,12 +553,7 @@ exports.initActions = function () {
 			const layer = await this.parseVariablesInString(event.options.layer_name)
 			const path = `${base_address}${layer}/speed`
 			const int = await this.parseVariablesInString(event.options.int)
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseInt(int),
-				},
-			])
+			sendNumericOsc(path, int, parseOscInteger, 'f')
 		},
 	}
 	actions['layer_mode'] = {
@@ -666,12 +586,7 @@ exports.initActions = function () {
 			const layer = await this.parseVariablesInString(event.options.layer_name)
 			const path = `${base_address}${layer}/mode`
 			const int = await this.parseVariablesInString(event.options.int)
-			this.sendOscMessage(path, [
-				{
-					type: 'i',
-					value: parseInt(int),
-				},
-			])
+			sendNumericOsc(path, int, parseOscInteger, 'i')
 		},
 	}
 	actions['layer_at_end_point'] = {
@@ -704,12 +619,7 @@ exports.initActions = function () {
 			const layer = await this.parseVariablesInString(event.options.layer_name)
 			const path = `${base_address}${layer}/at_end_point`
 			const int = await this.parseVariablesInString(event.options.int)
-			this.sendOscMessage(path, [
-				{
-					type: 'i',
-					value: parseInt(int),
-				},
-			])
+			sendNumericOsc(path, int, parseOscInteger, 'i')
 		},
 	}
 	actions['layer_transition_time'] = {
@@ -745,12 +655,7 @@ exports.initActions = function () {
 			const layer = await this.parseVariablesInString(event.options.layer_name)
 			const path = `${base_address}${layer}/transition_time`
 			const int = await this.parseVariablesInString(event.options.int)
-			this.sendOscMessage(path, [
-				{
-					type: 'i',
-					value: parseInt(int),
-				},
-			])
+			sendNumericOsc(path, int, parseOscInteger, 'i')
 		},
 	}
 	actions['layer_volume'] = {
@@ -787,12 +692,7 @@ exports.initActions = function () {
 			const layer = await this.parseVariablesInString(event.options.layer_name)
 			const path = `${base_address}${layer}/volume`
 			const float = await this.parseVariablesInString(event.options.float)
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(float),
-				},
-			])
+			sendNumericOsc(path, float, parseOscFloat, 'f')
 		},
 	}
 	actions['layer_brightness_shift'] = {
@@ -829,12 +729,7 @@ exports.initActions = function () {
 			const layer = await this.parseVariablesInString(event.options.layer_name)
 			const path = `${base_address}${layer}/brightness_(shift)`
 			const float = await this.parseVariablesInString(event.options.float)
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(float),
-				},
-			])
+			sendNumericOsc(path, float, parseOscFloat, 'f')
 		},
 	}
 	actions['layer_contrast_scale'] = {
@@ -871,12 +766,7 @@ exports.initActions = function () {
 			const layer = await this.parseVariablesInString(event.options.layer_name)
 			const path = `${base_address}${layer}/contrast_(scale)`
 			const float = await this.parseVariablesInString(event.options.float)
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(float),
-				},
-			])
+			sendNumericOsc(path, float, parseOscFloat, 'f')
 		},
 	}
 	actions['layer_saturation_scale'] = {
@@ -913,12 +803,7 @@ exports.initActions = function () {
 			const layer = await this.parseVariablesInString(event.options.layer_name)
 			const path = `${base_address}${layer}/saturation_scale`
 			const float = await this.parseVariablesInString(event.options.float)
-			this.sendOscMessage(path, [
-				{
-					type: 'f',
-					value: parseFloat(float),
-				},
-			])
+			sendNumericOsc(path, float, parseOscFloat, 'f')
 		},
 	}
 	// user-defined custom OSC action
@@ -972,14 +857,14 @@ exports.initActions = function () {
 			let argType = action.options.arg_type
 			let oscArg = { type: 's', value: value }
 			if (argType === 'int') {
-				const intVal = parseInt(value)
+				const intVal = parseOscInteger(value)
 				if (isNaN(intVal)) {
 					this.log('error', '[custom_osc] Argument is not a valid integer: ' + value)
 					return
 				}
 				oscArg = { type: 'i', value: intVal }
 			} else if (argType === 'float') {
-				const floatVal = parseFloat(value)
+				const floatVal = parseOscFloat(value)
 				if (isNaN(floatVal)) {
 					this.log('error', '[custom_osc] Argument is not a valid float: ' + value)
 					return

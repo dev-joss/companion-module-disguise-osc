@@ -216,6 +216,244 @@ for (const [id, option] of [
 	})
 }
 
+const invalidNumericInputs = [
+	'',
+	' ',
+	'12junk',
+	'1 2',
+	'1\n2',
+	'0x10',
+	'0b10',
+	'NaN',
+	'Infinity',
+	'-Infinity',
+	NaN,
+	Infinity,
+	null,
+	undefined,
+	true,
+	['12'],
+	{},
+]
+const invalidIntegerInputs = [
+	...invalidNumericInputs,
+	'1.5',
+	'1e2',
+	'2147483648',
+	'-2147483649',
+	'999999999999999999999',
+]
+const invalidFloatInputs = [...invalidNumericInputs, '1.2.3', '1e', '1e309', '1e39', '-1e39', 1e39]
+
+for (const [id, option, type, path] of [
+	['trackid', 'int', 'i', '/d3/showcontrol/trackid'],
+	['floatcue', 'float', 'f', '/d3/showcontrol/floatcue'],
+	['custom_osc', 'arg_value', 'i', '/d3/custom'],
+	['custom_osc', 'arg_value', 'f', '/d3/custom'],
+]) {
+	async function invoke(actions, value, resolveVariables) {
+		const options = { [option]: resolveVariables ? '$(internal:value)' : value }
+		if (id === 'custom_osc') {
+			options.osc_path = path
+			options.arg_type = type === 'i' ? 'int' : 'float'
+		}
+		await actions[id].callback(
+			{ options },
+			resolveVariables
+				? { parseVariablesInString: async (text) => (text === '$(internal:value)' ? value : text) }
+				: undefined,
+		)
+	}
+
+	test(`${id} rejects malformed and out-of-range OSC ${type} values`, async () => {
+		const { actions, messages } = createActions()
+		for (const resolveVariables of [false, true]) {
+			for (const value of type === 'i' ? invalidIntegerInputs : invalidFloatInputs) {
+				await invoke(actions, value, resolveVariables)
+				assert.deepEqual(messages, [], `input=${String(value)}, variables=${resolveVariables}`)
+			}
+		}
+	})
+
+	test(`${id} preserves valid OSC ${type} values and boundaries`, async () => {
+		const { actions, messages } = createActions()
+		const cases =
+			type === 'i'
+				? [
+						[0, 0],
+						['+42', 42],
+						['-42', -42],
+						[' 0012 ', 12],
+						['2147483647', 2147483647],
+						['-2147483648', -2147483648],
+					]
+				: [
+						[0, 0],
+						[1.25, 1.25],
+						['+1.25', 1.25],
+						['-.5', -0.5],
+						[' 1. ', 1],
+						['1.2e-3', 0.0012],
+						['2.5E+2', 250],
+						['3.4028235e38', 3.4028235e38],
+						['-3.4028235e38', -3.4028235e38],
+					]
+		for (const resolveVariables of [false, true]) {
+			for (const [input, value] of cases) {
+				await invoke(actions, input, resolveVariables)
+				assert.deepEqual(
+					messages.at(-1),
+					{ path, args: [{ type, value }] },
+					`input=${input}, variables=${resolveVariables}`,
+				)
+			}
+		}
+		assert.equal(messages.length, cases.length * 2)
+	})
+}
+
+for (const level of ['brightness', 'volume']) {
+	for (const direction of ['increment', 'decrement', 'shift']) {
+		const id = `${direction}_${level}`
+		test(`${id} rejects invalid steps`, async () => {
+			const { actions, messages, logs } = createActions({ [level]: '0.50' })
+			for (const resolveVariables of [false, true]) {
+				for (const input of invalidFloatInputs) {
+					await actions[id].callback(
+						{ options: { float: resolveVariables ? '$(internal:step)' : input } },
+						resolveVariables ? { parseVariablesInString: async () => input } : undefined,
+					)
+					assert.deepEqual(messages, [], `step=${String(input)}, variables=${resolveVariables}`)
+				}
+			}
+			assert.equal(logs.filter(({ level }) => level === 'error').length, invalidFloatInputs.length * 2)
+		})
+
+		test(`${id} rejects invalid current levels`, async () => {
+			const variables = {}
+			const { actions, messages } = createActions(variables)
+			for (const input of invalidFloatInputs) {
+				variables[level] = input
+				await actions[id].callback({ options: { float: '0.10' } })
+				assert.deepEqual(messages, [], `current level=${String(input)}`)
+			}
+		})
+
+		test(`${id} accepts a zero step and resolves a decimal step from a variable`, async (t) => {
+			const previousShift = utils.shift
+			t.after(() => {
+				utils.shift = previousShift
+			})
+			utils.shift = false
+			const { actions, messages } = createActions({ [level]: '0.50' })
+			await actions[id].callback({ options: { float: 0 } })
+			await actions[id].callback(
+				{ options: { float: '$(internal:step)' } },
+				{ parseVariablesInString: async () => '1e-1' },
+			)
+			assert.deepEqual(messages, [
+				{ path: `/d3/showcontrol/${level}`, args: [{ type: 'f', value: 0.5 }] },
+				{ path: `/d3/showcontrol/${level}`, args: [{ type: 'f', value: direction === 'decrement' ? 0.4 : 0.6 }] },
+			])
+		})
+	}
+
+	for (const [direction, current, step, expected] of [
+		['increment', '0.50', '0.10', 0.6],
+		['decrement', '0.50', '0.10', 0.4],
+		['increment', '0.99', '0.10', 1],
+		['decrement', '0.01', '0.10', 0],
+	]) {
+		test(`${direction} ${level} from ${current} stays within the documented range`, async () => {
+			const { actions, messages } = createActions({ [level]: current })
+			await actions[`${direction}_${level}`].callback({ options: { float: step } })
+			assert.deepEqual(messages, [{ path: `/d3/showcontrol/${level}`, args: [{ type: 'f', value: expected }] }])
+		})
+	}
+	for (const shift of [false, true]) {
+		test(`Shift ${level} resolves the step and uses shift=${shift}`, async (t) => {
+			const previousShift = utils.shift
+			t.after(() => {
+				utils.shift = previousShift
+			})
+			utils.shift = shift
+			const { actions, messages } = createActions({ [level]: '0.50' })
+			await actions[`shift_${level}`].callback(
+				{ options: { float: '$(internal:step)' } },
+				{
+					parseVariablesInString: async (text) => {
+						assert.equal(text, '$(internal:step)')
+						return '0.10'
+					},
+				},
+			)
+			assert.deepEqual(messages, [
+				{ path: `/d3/showcontrol/${level}`, args: [{ type: 'f', value: shift ? 0.4 : 0.6 }] },
+			])
+		})
+	}
+}
+
+test('Level actions reject calculated values outside the OSC float range', async (t) => {
+	const previousShift = utils.shift
+	t.after(() => {
+		utils.shift = previousShift
+	})
+	utils.shift = false
+	for (const level of ['brightness', 'volume']) {
+		for (const direction of ['increment', 'decrement', 'shift']) {
+			const current = direction === 'decrement' ? '3.4028235e38' : '-3.4028235e38'
+			const { actions, messages } = createActions({ [level]: current })
+			await actions[`${direction}_${level}`].callback({ options: { float: '-3.4028235e38' } })
+			assert.deepEqual(messages, [], `${direction}_${level}`)
+		}
+	}
+})
+
+for (const [id, option, inputType, suffix, input, expected] of [
+	['layer_blendmode', 'mode', 'i', 'blendmode', '00', 0],
+	['layer_brightness', 'float', 'f', 'brightness', '2.5e-1', 0.25],
+	['layer_tint', 'float', 'f', 'tint.g', '0.25', 0.25],
+	['layer_speed', 'int', 'i', 'speed', '-2', -2],
+	['layer_mode', 'int', 'i', 'mode', '1', 1],
+	['layer_at_end_point', 'int', 'i', 'at_end_point', '0', 0],
+	['layer_transition_time', 'int', 'i', 'transition_time', '2', 2],
+	['layer_volume', 'float', 'f', 'volume', '7.5e-1', 0.75],
+	['layer_brightness_shift', 'float', 'f', 'brightness_(shift)', '-.25', -0.25],
+	['layer_contrast_scale', 'float', 'f', 'contrast_(scale)', '1.5', 1.5],
+	['layer_saturation_scale', 'float', 'f', 'saturation_scale', '2.5', 2.5],
+]) {
+	const options = { base_address: '/d3/layer/', layer_name: 'video', channel: 'g' }
+
+	test(`${id} rejects invalid numeric inputs before sending`, async () => {
+		const invalidInputs = inputType === 'i' ? invalidIntegerInputs : invalidFloatInputs
+		for (const resolveVariables of [false, true]) {
+			for (const input of invalidInputs) {
+				const { actions, messages, logs } = createActions({}, async (text) =>
+					text === '$(internal:value)' ? input : text,
+				)
+				await actions[id].callback({
+					options: { ...options, [option]: resolveVariables ? '$(internal:value)' : input },
+				})
+				assert.deepEqual(messages, [], `input=${String(input)}, variables=${resolveVariables}`)
+				assert.equal(logs.filter(({ level }) => level === 'error').length, 1)
+			}
+		}
+	})
+
+	test(`${id} preserves its OSC address and argument type for valid input`, async () => {
+		const { actions, messages } = createActions({}, async (text) => (text === '$(internal:value)' ? input : text))
+		for (const value of [input, '$(internal:value)']) {
+			await actions[id].callback({ options: { ...options, [option]: value } })
+		}
+		const message = {
+			path: `/d3/layer/video/${suffix}`,
+			args: [{ type: id === 'layer_speed' ? 'f' : inputType, value: expected }],
+		}
+		assert.deepEqual(messages, [message, message])
+	})
+}
+
 for (const [argType, input, type, value] of [
 	['string', 'Fade up', 's', 'Fade up'],
 	['int', '0', 'i', 0],
