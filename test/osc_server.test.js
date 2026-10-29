@@ -55,9 +55,56 @@ test('OSC receiver buffers the latest message per address and updates variables'
 	assert.deepEqual(values, { volume: '0.75' })
 })
 
+test('OSC receiver reports an occupied port as a connection failure', async (t) => {
+	const { port, instance } = await connect(t)
+	port.emit('error', Object.assign(new Error('Address already in use'), { code: 'EADDRINUSE' }))
+	assert.deepEqual(instance.updateStatus.mock.calls[0].arguments, [
+		InstanceStatus.ConnectionFailure,
+		'Port 7400 in use elsewhere.',
+	])
+	assert.equal(instance.log.mock.calls[0].arguments[0], 'error')
+})
+
 test('OSC receiver reports other UDP errors', async (t) => {
 	const { port, instance } = await connect(t)
 	port.emit('error', new Error('UDP failure'))
 	assert.deepEqual(instance.updateStatus.mock.calls[0].arguments, [InstanceStatus.UnknownError, 'UDP failure'])
 	assert.equal(instance.log.mock.calls[0].arguments[0], 'error')
+})
+
+test('OSC receiver waits for the UDP port to close', async (t) => {
+	const { server, port } = await connect(t)
+	let closed = false
+	const closing = server.close().then(() => (closed = true))
+	try {
+		assert.equal(port.close.mock.callCount(), 1)
+		// osc.UDPPort.close() returns undefined and later emits a close event.
+		await new Promise((resolve) => setImmediate(resolve))
+		assert.equal(closed, false, 'close resolved before the UDP close event')
+	} finally {
+		port.emit('close')
+		await closing
+	}
+})
+
+test('OSC receiver can close before a UDP port exists', async () => {
+	const server = { ...oscServer, udpPort: undefined }
+	await assert.doesNotReject(server.close())
+})
+
+test('OSC receiver registers for closure before calling the UDP close method', async (t) => {
+	const { server, port } = await connect(t)
+	port.close.mock.mockImplementation(() => {
+		port.emit('close')
+	})
+	await server.close()
+	assert.equal(port.close.mock.callCount(), 1)
+})
+
+test('OSC receiver rejects closure when the UDP port reports an error', async (t) => {
+	const { server, port } = await connect(t)
+	const error = new Error('UDP close failed')
+	const rejection = assert.rejects(server.close(), error)
+	port.emit('error', error)
+	await rejection
 })
